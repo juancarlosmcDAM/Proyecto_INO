@@ -1,113 +1,267 @@
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h> 
+#include <WiFiClientSecure.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
 #include "max6675.h"
-#include <Wire.h> 
-//-------------------VARIABLES GLOBALES--------------------------
-int contconexion = 0;
+#include <EMailSender.h>
 
-const char *ssid = "***********";
-const char *password = "***********";
-
-unsigned long previousMillis = 0;
-
-char *host = "***********" ;
-String strhost = "***********";
-String strurl = "/datosSensores.php";
-
+//TERMOSENSOR
 int thermoDO = 12;
 int thermoCS = 13;
 int thermoCLK = 14;
-
 MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
 
-//-------Función para Enviar Datos a la Base de Datos SQL--------
+int counterTemp = 0;
+int counterVoltaje = 0;
+unsigned long previousMillis = 0;
 
-String enviardatos(String datos) {
-  String linea = "error";
-  WiFiClient client;
-  //strhost.toCharArray(host, 49);
-  if (!client.connect(host, 80)) {
-    Serial.println("Fallo de conexion");
-    return linea;
-  }
 
-  client.print(String("POST ") + strurl + " HTTP/1.1" + "\r\n" + 
-               "Host: " + strhost + "\r\n" +
-               "Connection: keep-alive" + "\r\n" + 
-               "Content-Length: " + datos.length() + "\r\n" +
-               "Cache-Control: max-age=0" + "\r\n" + 
-               "Upgrade-Insecure-Requests: 1" + "\r\n" + 
-               "Origin: ***********" + "\r\n" + 
-               "Content-Type: application/x-www-form-urlencoded" + "\r\n" + 
-               "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.90 Safari/537.36" + "\r\n" + 
-               
-               "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" + "\r\n" + 
-               "Referer: http://pruebaesp.epizy.com/" + "\r\n" + 
-               "Accept-Encoding: gzip, deflate" + "\r\n" + 
-               "Accept-Language: es-ES,es;q=0.9,en;q=0.8" + "\r\n" + 
-               //"Cookie: _ga=GA1.2.502390546.1617007589; _gid=GA1.2.1477337022.1617169836; __test=c63a4363360a09dd85596b39aec395c5" + "\r\n" +              
-               "Cookie: _ga=GA1.2.502390546.1617007589; _gid=GA1.2.530560426.1618294575; __test=dceaadb3359cb26f0e2039d5655ca320" + "\r\n" +
-               "\r\n" + datos);           
-  delay(10);             
-  
-  Serial.print("Enviando datos a SQL...");
-  
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println("Cliente fuera de tiempo!");
-      client.stop();
-      return linea;
-    }
-  }
-  // Lee todas las lineas que recibe del servidro y las imprime por la terminal serial
-  while(client.available()){
-    linea = client.readStringUntil('\r');
-    Serial.print(linea);
-  }  
-  //Serial.println(linea);
-  return linea;
-}
+//MEDIDOR DE VOLTAJE
+int readValue;
+int maxValue = 0;
+int minValue = 1024;
+float Vpp;
+float Vrms;
+float current;
+float power;
 
-//-------------------------------------------------------------------------
+
+const char *ssid = "*********";
+const char *password = "*********";
+
+//Web/Server address to read/write from
+const char *host = "*********";
+const int httpsPort = 443;  //HTTPS= 443 and HTTP = 80
+
+//SHA1 huella digital del certificado de la web
+const char fingerprint[] PROGMEM = "E6 EF CA 92 DD A6 50 4B 88 2D DE 44 D7 4C A6 A7 75 78 E3 68";
+
+//TELEGRAM
+//const String BOTtoken  = "*****(token)*****";  // your Bot Token (Get from Botfather)
+//const String CHAT_ID = "*****(ID_TELEGRAM_CHAT)*****";
+//X509List cert(TELEGRAM_CERTIFICATE_ROOT);
+//WiFiClientSecure clientTelegram;
+//UniversalTelegramBot bot(BOTtoken, clientTelegram);
+
+//GMAIL
+//Configura el emisor del email
+EMailSender emailSend("****(email)*****", "*****(password)*****");
+
+//=======================================================================
+//                    Power on setup
+//=======================================================================
 
 void setup() {
-
-  // Inicia Serial
+  delay(1000);
   Serial.begin(115200);
+  WiFi.mode(WIFI_OFF);        //Prevents reconnection issue (taking too long to connect)
+  delay(1000);
+  WiFi.mode(WIFI_STA);        //Only Station No AP, This line hides the viewing of ESP as wifi hotspot
+
+  WiFi.begin(ssid, password);     //Connect to your WiFi router
   Serial.println("");
 
-  // Conexión WIFI
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED and contconexion <50) { //Cuenta hasta 50 si no se puede conectar lo cancela
-    ++contconexion;
+  Serial.print("Connecting");
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  if (contconexion <500) {
-      //para usar con ip fija     
-      Serial.println("");
-      Serial.println("WiFi conectado");
-      Serial.println(WiFi.localIP());
-  }
-  else { 
-      Serial.println("");
-      Serial.println("Error de conexion");
-  }
+
+  //If connection successful show IP address in serial monitor
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());  //IP address assigned to your ESP
+
+  //********************* EMAIL *********************
+
+  EMailSender::EMailMessage message;
+  message.subject = "Conexión iniciada en ****";
+  message.message = "Sensor conectado a WIFI";
+
+  //Configura el receptor del email
+  EMailSender::Response resp = emailSend.send("*********", message);
+
+  Serial.println("Sending status: ");
+
+  Serial.println(resp.status);
+  Serial.println(resp.code);
+  Serial.println(resp.desc);
+
+  //********************* TELEGRAM *********************
+  //    configTime(0, 0, "pool.ntp.org");      // get UTC time via NTP
+  //    clientTelegram.setTrustAnchors(&cert); // Add root certificate for api.telegram.org
+  //    bot.sendMessage(CHAT_ID, "Bot Restarted", "");
+
 }
 
-//--------------------------LOOP--------------------------------//
+//=======================================================================
+//                    Main Program Loop
+//=======================================================================
 void loop() {
+  //Lee el sensor de temperatura y almacena el valor en esta variable
+  float temp = thermocouple.readCelsius();
+
+  uint32_t startTime = millis();
+
+//  //Lee la entrada analogica y calcula los valores del voltaje
+//  while ( millis() - startTime < 1000) {
+//    /* Lee el valor del sensor en el puerto analogico */
+//    readValue = analogRead(A0);
+//
+//    /* Determina el valor maximo */
+//    if (readValue > maxValue) maxValue = readValue;
+//
+//    /* Determina el valor minimo */
+//    if (readValue < minValue) minValue = readValue;
+//  }
+//
+//  /* Cualcula el VPP */
+//  Vpp = ((maxValue - minValue) * 3.3) / 1024.0;
+//
+//  /* Determina el Vrms */
+//  Vrms = (Vpp / 2.0) * 0.707;
+//
+//  /*
+//    Then find the current using sensitivity of sensor
+//    It is 185mV/A for 5A, 100 mV/A for 20A and 66mV/A for 30A Module
+//    We are using 5A sensor
+//  */
+//  current = (Vrms * 1000.0) / 185.0;
+//
+//  /* Finally calculate the power considering ideal state with pure resistive load */
+//  power = 230.0 * current;
+
+  ///////////////////////////////////////////////
+  ////////////Alertas sensor Voltaje/////////////
+  ///////////////////////////////////////////////
+  /*
+
+
+    if (power <= 11) {
+
+      counterVoltaje++;
+      //Serial.println("CounterVoltaje = " + String(counterVoltaje));
+    } else {
+      counterVoltaje = 0;
+      //Serial.println("CounterVoltaje = " + String(counterVoltaje));
+    }
+
+    if (counterVoltaje == 6) {
+      Serial.println("Enviando correo...");
+      EMailSender::EMailMessage message;
+      message.subject = "Alerta voltaje ****";
+      String mensaje = "Sensor no mide voltaje desde hace un tiempo ";
+      message.message = mensaje;
+
+      EMailSender::Response resp = emailSend.send("*********", message);
+      counterVoltaje = 0;
+      delay(200);
+    }
+  */
+  ///////////////////////////////////////////////
+  ///////////////////////////////////////////////
+  ///////////////////////////////////////////////
+
+  //Este if comprueba que la temperatura esté dentro de los valores indicados
+  //Si no es así suma 1 al contador para mandar un mail
+  if (temp > 20 && temp <= 24) {
+    counterTemp = 0;
+    //Serial.println("CounterTemperatura = " + String(counterTemp));
+  } else {
+    counterTemp++;
+    //Serial.println("CounterTemperatura = " + String(counterTemp));
+  }
+    Serial.println(" ---- " + String(temp));
+    Serial.println("CounterTemperatura = " + String(counterTemp));
+
+  //Este if envia un email de alerta si el contador de temperatura llega a 6
+  if (counterTemp == 6) {
+    Serial.println("Enviando correo...");
+    EMailSender::EMailMessage message;
+    message.subject = "Alerta por temperatura ****";
+    String mensaje = "Sensor ha medido una temperatura de ";
+    mensaje += temp;
+    mensaje += "°C ";
+    message.message = mensaje;
+    
+    EMailSender::Response resp = emailSend.send("*********", message);
+    counterTemp = 0;
+    delay(200);
+  }
 
   unsigned long currentMillis = millis();
-  
-  if (currentMillis - previousMillis >= 10000) { //envia la temperatura cada 10 segundos
+  //Cada 60'' envía el valor de la temperatura a la BBDD
+  if (currentMillis - previousMillis >= 60000) {
     previousMillis = currentMillis;
-    float temp = thermocouple.readCelsius();
-    String nombreChip = "Sensor****";
-    String codigo_Sensor = "TS2021-001";
-    Serial.println(" ---- " + String(temp));
-    Serial.println(" ---- " + nombreChip);
-    enviardatos("&temperatura=" + String(temp, 2) + "&nombreChip=" + nombreChip + "&codigo_Sensor=" + codigo_Sensor );
+    enviarDatosBBDD();
   }
+
 }
+
+//Esta función envía una petición HTTP GET a la base de datos
+//La cual almacena los datos del sensor de temperatura
+void enviarDatosBBDD() {
+  WiFiClientSecure httpsClient;    //Declare object of class WiFiClient
+
+  Serial.println(host);
+
+  Serial.printf("Using fingerprint '%s'\n", fingerprint);
+  httpsClient.setFingerprint(fingerprint);
+  httpsClient.setTimeout(15000); // 15 Seconds
+  delay(1000);
+
+  Serial.print("HTTPS Connecting");
+  int r = 0; //retry counter
+  while ((!httpsClient.connect(host, httpsPort)) && (r < 30)) {
+    delay(100);
+    Serial.print(".");
+    r++;
+  }
+  if (r == 30) {
+    Serial.println("Connection failed");
+  }
+  else {
+    Serial.println("Connected to web");
+  }
+
+  float temp = thermocouple.readCelsius();
+
+  String  Link;
+
+  //GET Data
+  Link = "/iot.php?temp=" + String(temp, 2) ;
+
+  Serial.print("requesting URL: ");
+  Serial.println(host + Link);
+
+  httpsClient.print(String("GET ") + Link + " HTTP/1.1\r\n" +
+                    "Host: " + host + "\r\n" +
+                    "Connection: close\r\n\r\n");
+
+  Serial.println("request sent");
+
+  while (httpsClient.connected()) {
+    String line = httpsClient.readStringUntil('\n');
+    if (line == "\r") {
+      Serial.println("headers received");
+      break;
+    }
+  }
+
+  Serial.println("reply was:");
+  Serial.println("==========");
+  String line;
+  while (httpsClient.available()) {
+    line = httpsClient.readStringUntil('\n');  //Read Line by Line
+    Serial.println(line); //Print response
+  }
+  Serial.println("==========");
+  Serial.println("closing connection");
+
+
+}
+
+//=======================================================================
